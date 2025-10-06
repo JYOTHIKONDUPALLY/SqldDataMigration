@@ -124,6 +124,16 @@ async function migratePayments(mysqlConn, clickhouse, batchSize = 1000) {
           posTerminalName = "N/A";
         }
 
+        let paymentMethodName = "";
+        if (r.paymentMethodId) {
+          const [[paymentMethod]] = await mysqlConn.execute(
+            "SELECT name FROM paymentmethod WHERE id = ?",
+            [r.paymentMethodId]
+          );
+          paymentMethodName = paymentMethod?.name || "N/A";
+        }
+
+
         data.push({
           id: r.paymentId,
           franchise: "dummy",
@@ -135,7 +145,8 @@ async function migratePayments(mysqlConn, clickhouse, batchSize = 1000) {
           pos_terminal: posTerminalName,
           pos_terminal_id: r.posTerminalId || 0,
           franchise_id: 0, // default
-          payment_method: safeStr(r.paymentMethodId),
+          payment_method_id: safeStr(r.paymentMethodId),
+          payment_method: safeStr(paymentMethodName),
           amount_paid: safeNum(r.amount),
           refund_amount: safeNum(r.refundAmount),
           reference_number: safeStr(r.code),

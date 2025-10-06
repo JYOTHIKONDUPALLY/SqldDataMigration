@@ -79,6 +79,7 @@ CREATE TABLE paymentDetails (
     pos_terminal_id UInt64,
     payment_date Date,
     amount_paid Decimal(12,2),
+    payment_method_id UInt64,
     payment_method String,
     refund_amount Decimal(12,2),
     notes String,
@@ -123,3 +124,44 @@ provider String,
 )
 ENGINE = MergeTree()
 ORDER BY Email;
+
+
+
+
+CREATE TABLE IF NOT EXISTS product_inventory (
+    -- Primary identifiers
+    id UInt64,
+    franchise_id UInt64,
+    provider_id UInt64,
+    franchise String,
+    provider String,
+    status String,
+    -- Product details
+    name String,
+    sku String,
+    upc String,
+    serial String,
+    brand_id UInt64,
+    brand_name String,
+    -- Categorization
+    category String,
+    sub_category String,
+    -- Pricing
+    price Decimal64(2),
+    cost Decimal64(2),
+    average_cost Decimal64(2),
+    -- Calculated fields
+    gross_profit_percent Decimal64(2),
+    extended_cost Decimal64(2),
+    extended_price Decimal64(2),
+    -- Inventory quantities
+    qoh Int32,  -- Quantity on Hand
+    rental Int32,
+    qor Int32,  -- Quantity on Reserved
+    qoo Int32,  -- Quantity on Order
+    -- Audit fields
+    created_at DateTime DEFAULT now(),
+    updated_at DateTime DEFAULT now()
+) ENGINE = MergeTree()
+ORDER BY ( id)
+PARTITION BY toYYYYMM(created_at);
