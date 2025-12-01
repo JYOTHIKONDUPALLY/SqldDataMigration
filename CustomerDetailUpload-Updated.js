@@ -66,18 +66,32 @@ function Aquire(data) {
 {
 
 }
-async function migrateCustomers(mysqlConn, clickhouse) {
+async function migrateCustomers(mysqlConn, clickhouse,batchSize = 100) {
     try {
+         const [countResult] = await mysqlConn.execute(
+      `SELECT COUNT(*) as total  FROM customer c
+      inner join serviceProviderCustomerDetails scd on scd.customerId = c.id where scd.serviceProviderId = 22`
+    );
+    const totalRecords = countResult[0].total;
+    console.log(`Total customers to migrate: ${totalRecords}`);
+
+    if (totalRecords === 0) {
+      console.log("No customers found to migrate.");
+      return;
+    }
         const franchiseId = 0 //TODO : change later
         const franchiseName = '88 Tactile' //TODO : change later
         // fetch base customers
-        const [rows] = await mysqlConn.execute(`
+         let offset = 0;
+            let totalMigrated = 0;
+            while(offset < totalRecords){
+                 const [rows] = await mysqlConn.execute(`
       SELECT 
         c.id, c.email, c.firstName, c.middleName, c.lastName,
         c.mobile, c.phone, c.dob, c.status, c.gender, 
         c.serviceLocation, c.creationDate, c.idNumber, c.acquired
       FROM customer c
-      inner join serviceProviderCustomerDetails scd on scd.customerId = c.id where scd.serviceProviderId = 22
+      inner join serviceProviderCustomerDetails scd on scd.customerId = c.id where scd.serviceProviderId = 22 LIMIT ${batchSize} OFFSET ${offset}
     `);
 
         console.log(`Fetched ${rows.length} rows from MySQL (customers)`);
@@ -197,14 +211,25 @@ async function migrateCustomers(mysqlConn, clickhouse) {
             }
 
             if (values.length > 0) {
+                if (offset === 0) {
+          console.log("Sample record for ClickHouse insert:");
+          console.log(JSON.stringify(values[0], null, 2));
+        }
                 await clickhouse.insert({
                     table: 'customers',
                     values,
                     format: 'JSONEachRow'
                 });
-                console.log('✅ Customers migrated to ClickHouse successfully!');
+                 totalMigrated += values.length;
+        console.log(
+          ` Migrated batch: ${offset + 1} → ${offset + values.length} (total so far: ${totalMigrated})`
+        );
             }
+               offset += batchSize;
         }
+            }
+       
+        console.log(`🎉 customer migration completed. Total migrated: ${totalMigrated}`);
     } catch (err) {
         console.error('❌ Customers migration error:', err);
     }

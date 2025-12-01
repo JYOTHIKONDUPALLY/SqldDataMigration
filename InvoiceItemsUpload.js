@@ -203,20 +203,18 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
     const subCategoryMap = new Map(subcategories.map(s => [s.name.toLowerCase(), s.id]));
 
     // Count total rows
-    const [countResult] = await mysqlConn.execute(`SELECT COUNT(*) as total FROM invoiceItemNew where serviceProviderId = 2087`);
+    const [countResult] = await mysqlConn.execute(`SELECT COUNT(*) as total FROM invoiceItemNew where serviceProviderId = 22`);
     const totalRecords = countResult[0].total;
     console.log(`Total invoice items to migrate: ${totalRecords}`);
 
     let offset = 0;
     while (offset < totalRecords) {
       const [rows] = await mysqlConn.execute(
-        `SELECT i.*, c.cogs, c.commission
+        `SELECT i.*
          FROM invoiceItemNew i
-         LEFT JOIN cashSaleInvoice c ON i.invoiceId = c.invoiceId
-         where i.serviceProviderId = 2087
+         where i.serviceProviderId = 22
          ORDER BY i.id
-         LIMIT ? OFFSET ?`,
-        [batchSize, offset]
+         LIMIT ${batchSize} OFFSET ${offset}`
       );
 
       const data = [];
@@ -245,7 +243,7 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
             }
           }
 
-          console.log(` Product ID ${r.itemId} → Brand: ${brandName}, SKU: ${skuValue}, UPC: ${upcValue}`);
+          // console.log(` Product ID ${r.itemId} → Brand: ${brandName}, SKU: ${skuValue}, UPC: ${upcValue}`);
         }
 
         // --- category/subcategory ---
@@ -275,7 +273,15 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
         const membershipDiscount = await calcRedeemDiscount("membershipRedeem");
         const packageDiscount = await calcRedeemDiscount("packageRedeem");
         const guestpassDiscount = await calcRedeemDiscount("guestpassRedeem");
+        const [CogsData] = await mysqlConn.execute(
+    `SELECT c.cogs, c.commission 
+     FROM cashSaleInvoice c 
+     WHERE c.invoiceItemId = ?`,
+    [r.id]
+  );
 
+  const { Cogs, Commission } = CogsData[0] || {};
+  console.log(`Invoice item ${r.id} has Cogs: ${Cogs}, Commission: ${Commission}`);
         // --- build record ---
         data.push({
           id: r.id,
@@ -297,9 +303,9 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
           total_price: safeNum(r.totalPrice),
           resource_id: r.resourceId || 0,
           department_id: r.departmentId || 0,
-          cogs: safeNum(r.cogs),
+          cogs: Cogs,
           co_faet_tax: Math.round(safeNum(r.pifTax)),
-          commission: safeNum(r.commission),
+          commission: Commission,
           guest_pass_discount: guestpassDiscount,
           membership_discount: membershipDiscount,
           package_discount: packageDiscount,
@@ -325,7 +331,7 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
           for (const rec of data) {
             try {
               await clickhouse.insert({
-                table: 'invoice_items',
+                table: 'invoice_items_detail',
                 values: [rec],
                 format: 'JSONEachRow',
               });
@@ -348,11 +354,11 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
 
 async function migrateData() {
 
-  const mysqlConn = await mysql.createConnection({
-    host: 'bizzflo-production-aurora3-cluster.cluster-ro-cs3e3cx0hfys.us-west-2.rds.amazonaws.com',   // or your DB host
-    user: 'bizzflo',        // your DB username
-    password: 'my5qlskeedazz!!',// your DB password
-    database: 'bizzflo'   // your DB name
+    const mysqlConn = await mysql.createConnection({
+    host: 'localhost',
+    user: 'root',
+    password: '',
+    database: 'bizzflo',
   });
 
   const clickhouse = createClient({

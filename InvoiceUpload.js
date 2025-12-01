@@ -61,7 +61,7 @@ async function migrateInvoices(mysqlConn, clickhouse, batchSize = 2000) {
   try {
     console.log('🚀 Starting invoice migration from MySQL to ClickHouse...');
 
-    const [countResult] = await mysqlConn.execute('SELECT COUNT(*) as total FROM invoiceNew where invoiceNew.serviceProviderId in (27163,2087)');
+    const [countResult] = await mysqlConn.execute('SELECT COUNT(*) as total FROM invoiceNew ');
     const totalRecords = countResult[0].total;
     console.log(`📊 Total records to migrate: ${totalRecords}`);
 
@@ -79,9 +79,9 @@ async function migrateInvoices(mysqlConn, clickhouse, batchSize = 2000) {
         SELECT 
           id, serviceProviderId, invoiceNumber, customerId, customerMemberId,
           resourceId, loggedinUserId, locationId, invoiceDate, status, price, discount, 
-          grandTotal, dueDate, posTerminalId, notes, parentInvoiceId, tax
+          grandTotal, dueDate, posTerminalId, notes, parentInvoiceId, tax, bookingType
         FROM invoiceNew
-         where invoiceNew.serviceProviderId in (27163,2087)
+      
         ORDER BY id
         LIMIT ? OFFSET ?
       `, [batchSize, offset]);
@@ -128,9 +128,19 @@ async function migrateInvoices(mysqlConn, clickhouse, batchSize = 2000) {
       const customerMap = Object.fromEntries(customers.map(c => [c.id, c]));
       const companyMap = Object.fromEntries(companies.map(c => [c.id, c]));
       const posMap = Object.fromEntries(posTerminals.map(p => [p.id, p]));
+      const bookingMap = {
+    1: 'online',
+    0: 'online',
+    2: 'phone_in',
+    3: 'walk_in',
+    4: 'mobile_app'
+};
+
+console.log("booking type", bookingMap[0]);
 
       // 🔹 Build processed data
-      const processedData = rows.map(row => ({
+      const processedData = rows.map(row => (
+     {
         id: row.id,
         franchise_id,
         franchise,
@@ -158,6 +168,7 @@ async function migrateInvoices(mysqlConn, clickhouse, batchSize = 2000) {
         retail_discount: Number(row.discount) || 0.0,
         notes: String(row.notes || ''),
         tax: Number(row.tax) || 0.0,
+        booking_type:  bookingMap[row.bookingType] || '',
         created_at: formatDate(row.invoiceDate),
         updated_at: formatDate(row.invoiceDate)
       }));

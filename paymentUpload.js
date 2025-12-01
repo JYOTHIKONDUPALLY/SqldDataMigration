@@ -59,7 +59,7 @@ async function migratePayments(mysqlConn, clickhouse, batchSize = 1000) {
   try {
     // Count total records
     const [countResult] = await mysqlConn.execute(
-      `SELECT COUNT(*) as total FROM paymentItemNew  where paymentItemNew.serviceProviderId =2087`
+      `SELECT COUNT(*) as total FROM paymentItemNew  where paymentItemNew.serviceProviderId =22`
     );
     const totalRecords = countResult[0].total;
     console.log(`Total payments to migrate: ${totalRecords}`);
@@ -75,19 +75,7 @@ async function migratePayments(mysqlConn, clickhouse, batchSize = 1000) {
     while (offset < totalRecords) {
       // ⚠️ Alias IDs to avoid collisions
       const [rows] = await mysqlConn.execute(
-        `SELECT 
-            paymentItemNew.id AS paymentId,
-            paymentItemNew.*,
-            invoiceNew.serviceProviderId,
-            invoiceNew.locationId,
-            invoiceNew.posTerminalId
-         FROM paymentItemNew
-         LEFT JOIN invoiceNew ON paymentItemNew.invoiceId = invoiceNew.id
-          where paymentItemNew.serviceProviderId =2087
-         ORDER BY paymentItemNew.id
-         LIMIT ${batchSize} OFFSET ${offset}
-        `
-      );
+        `SELECT paymentItemNew.id AS paymentId,paymentItemNew.*,invoiceNew.serviceProviderId, invoiceNew.locationId,invoiceNew.posTerminalId FROM paymentItemNew LEFT JOIN invoiceNew ON paymentItemNew.invoiceId = invoiceNew.id where paymentItemNew.serviceProviderId =22  ORDER BY paymentItemNew.id LIMIT ${batchSize} OFFSET ${offset} ` );
 
       const data = [];
       for (const r of rows) {
@@ -188,13 +176,13 @@ async function migratePayments(mysqlConn, clickhouse, batchSize = 1000) {
 
 
 async function migrateData() {
-
   const mysqlConn = await mysql.createConnection({
-    host: 'bizzflo-production-aurora3-cluster.cluster-ro-cs3e3cx0hfys.us-west-2.rds.amazonaws.com',   // or your DB host
-    user: 'bizzflo',        // your DB username
-    password: 'my5qlskeedazz!!',// your DB password
-    database: 'bizzflo'   // your DB name
+    host: 'localhost',
+    user: 'root',
+    password: '',
+    database: 'bizzflo',
   });
+
 
   const clickhouse = createClient({
     url: 'http://localhost:8123',
