@@ -126,10 +126,10 @@ export async function migrateAppointments(mysqlConnection, clickhouseClient, bat
       inner join rangeTicket r on r.appointmentId = a.id
       WHERE a.serviceProviderId=22
       ORDER BY a.date, a.id
-      LIMIT ? OFFSET ?
+      LIMIT ${batchSize} OFFSET ${offset}
     `;
     
-    const [appointments] = await mysqlConnection.execute(query, [ batchSize, offset]);
+    const [appointments] = await mysqlConnection.execute(query);
     
     if (appointments.length === 0) {
       console.log('No more appointments to process.');
