@@ -59,7 +59,7 @@ async function migratePayments(mysqlConn, clickhouse, batchSize = 1000) {
   try {
     // Count total records
     const [countResult] = await mysqlConn.execute(
-      `SELECT COUNT(*) as total FROM paymentItemNew  where paymentItemNew.serviceProviderId =22`
+      `SELECT COUNT(*) as total FROM paymentItemNew  where paymentItemNew.serviceProviderId =2087`
     );
     const totalRecords = countResult[0].total;
     console.log(`Total payments to migrate: ${totalRecords}`);
@@ -75,60 +75,77 @@ async function migratePayments(mysqlConn, clickhouse, batchSize = 1000) {
     while (offset < totalRecords) {
       // ⚠️ Alias IDs to avoid collisions
       const [rows] = await mysqlConn.execute(
-        `SELECT paymentItemNew.id AS paymentId,paymentItemNew.*,invoiceNew.serviceProviderId, invoiceNew.locationId,invoiceNew.posTerminalId FROM paymentItemNew LEFT JOIN invoiceNew ON paymentItemNew.invoiceId = invoiceNew.id where paymentItemNew.serviceProviderId =22  ORDER BY paymentItemNew.id LIMIT ${batchSize} OFFSET ${offset} ` );
+        `SELECT 
+            paymentItemNew.id AS paymentId,
+            paymentItemNew.*
+         FROM paymentItemNew         
+          where serviceProviderId =2087 && status=1
+         ORDER BY id
+         LIMIT ${batchSize} OFFSET ${offset}
+        `
+      );
 
       const data = [];
       for (const r of rows) {
         // Provider name
-        let providerName = "N/A";
+        let providerName = "Other";
+        let locationId =0;
+        if (r.invoiceId) {
+          const [[prov]] = await mysqlConn.execute(
+            "SELECT locationId as locationId FROM invoiceNew WHERE id = ?",
+            [r.invoiceId]
+          );
+          locationId = prov?.locationId || "0";
+        }
+
         if (r.serviceProviderId) {
           const [[prov]] = await mysqlConn.execute(
             "SELECT legalName as name FROM serviceProvider WHERE id = ?",
             [r.serviceProviderId]
           );
-          providerName = prov?.name || "N/A";
+          providerName = prov?.name || "Other";
         }
 
         // Location name
-        let locationName = "N/A";
-        if (r.locationId) {
+        let locationName = "Other";
+        if (locationId) {
           const [[loc]] = await mysqlConn.execute(
             "SELECT name FROM location WHERE id = ?",
-            [r.locationId]
+            [locationId]
           );
-          locationName = loc?.name || "N/A";
+          locationName = loc?.name || "Other";
         }
 
         // POS Terminal
-        let posTerminalName = "N/A";
+        let posTerminalName = "Other";
         if (r.posTerminalId) {
           const [[posTerminal]] = await mysqlConn.execute(
             "SELECT name FROM posTerminal WHERE id = ?",
             [r.posTerminalId]
           );
-          posTerminalName = posTerminal?.name || "N/A";
+          posTerminalName = posTerminal?.name || "Other";
         } else {
           // console.log(`posterminal id missing for payment id: ${r.paymentId}, ${(r.posTerminalId)}`);
-          posTerminalName = "N/A";
+          posTerminalName = "Other";
         }
 
         let paymentMethodName = "";
         if (r.paymentMethodId) {
           const [[paymentMethod]] = await mysqlConn.execute(
-            "SELECT name FROM paymentmethod WHERE id = ?",
+            "SELECT name FROM paymentMethod WHERE id = ?",
             [r.paymentMethodId]
           );
-          paymentMethodName = paymentMethod?.name || "N/A";
+          paymentMethodName = paymentMethod?.name || "Other";
         }
 
 
         data.push({
           id: r.paymentId,
-          franchise: "dummy",
+          franchise: "88 Tactical",
           provider: providerName,
           provider_id: r.serviceProviderId || 0,
           location: locationName,
-          location_id: r.locationId || 0,
+          location_id: locationId || 0,
           invoice_id: r.invoiceId || 0,
           pos_terminal: posTerminalName,
           pos_terminal_id: r.posTerminalId || 0,
@@ -139,7 +156,7 @@ async function migratePayments(mysqlConn, clickhouse, batchSize = 1000) {
           refund_amount: safeNum(r.refundAmount),
           reference_number: safeStr(r.code),
           notes: safeStr(r.notes),
-          payment_date: formatDateOnly(r.paymentDate || new Date()),
+          payment_date: formatDateOnly(r.date || new Date()),
           created_at: formatDate(r.createdAt || new Date()),
           updated_at: formatDate(r.updatedAt || new Date()),
         });
@@ -176,13 +193,13 @@ async function migratePayments(mysqlConn, clickhouse, batchSize = 1000) {
 
 
 async function migrateData() {
+
   const mysqlConn = await mysql.createConnection({
     host: 'localhost',
     user: 'root',
     password: '',
     database: 'bizzflo',
   });
-
 
   const clickhouse = createClient({
     url: 'http://localhost:8123',

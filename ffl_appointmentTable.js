@@ -58,7 +58,7 @@ function formatDateOnly(dateValue) {
   }
 }
 
-export async function migrateClassSession(mysqlConnection, clickhouseClient, batchSize = 2000) {
+export async function migrateAppointments(mysqlConnection, clickhouseClient, batchSize = 2000) {
   console.log('Starting appointment migration with range and rental data...');
   
   // Create ClickHouse table
@@ -69,17 +69,17 @@ export async function migrateClassSession(mysqlConnection, clickhouseClient, bat
   const params = [];
   
   if (CONFIG.serviceProviderId) {
-    whereConditions.push('a.serviceProviderId = ?');
+    whereConditions.push('serviceProviderId = ?');
     params.push(CONFIG.serviceProviderId);
   }
   
   if (CONFIG.dateFrom) {
-    whereConditions.push('a.date >= ?');
+    whereConditions.push('date >= ?');
     params.push(CONFIG.dateFrom);
   }
   
   if (CONFIG.dateTo) {
-    whereConditions.push('a.date <= ?');
+    whereConditions.push('date <= ?');
     params.push(CONFIG.dateTo);
   }
   
@@ -87,8 +87,7 @@ export async function migrateClassSession(mysqlConnection, clickhouseClient, bat
   
   // Get total count
   const [countResult] = await mysqlConnection.execute(
-    `SELECT COUNT(*) as total FROM appointment a WHERE ${whereClause}`,
-    params
+    `SELECT COUNT(*) as total FROM appointment a inner join rangeTicket r on r.appointmentId = a.id WHERE a.serviceProviderId=22`
   );
   const totalRecords = countResult[0].total;
   console.log(`Total records to migrate: ${totalRecords}`);
@@ -100,76 +99,37 @@ export async function migrateClassSession(mysqlConnection, clickhouseClient, bat
   
   let offset = 0;
   let migratedCount = 0;
-const bookingMap = {
+  
+  const bookingMap = {
     1: 'online',
     0: 'online',
     2: 'phone_in',
     3: 'walk_in',
     4: 'mobile_app'
-};
+  };
+  
+  const StaffMap = {
+    1: 'Regular',
+    2: 'temperory',
+    3: 'Seasional',
+    4: 'Contractor',
+    5: 'FullTimeStudent',
+    6: 'PartTimeStudent'
+  };
   
   while (offset < totalRecords) {
     console.log(`\n=== Processing batch: ${offset + 1} to ${Math.min(offset + batchSize, totalRecords)} ===`);
     
-    // Fetch enriched appointment data with all related tables
+    // Fetch appointments only
     const query = `
-      SELECT 
-        a.*,
-        CONCAT(COALESCE(c.firstName, ''), ' ', COALESCE(c.lastName, '')) as customerName,
-        sp.legalName as providerName,
-        sl.name as serviceLocationName,
-        s.name as serviceName,
-        l.name as locationName,
-        CONCAT(COALESCE(r.firstName, ''), ' ', COALESCE(r.lastName, '')) as resourceName,
-        rec.pattern as recurringPattern,
-        CONCAT(COALESCE(cm.firstName, ''), ' ', COALESCE(cm.lastName, '')) as customerMemberName,
-        p.name as packageName,
-        
-        -- Range ticket data (one-to-one with appointment)
-        rt.id as rangeTicketId,
-        rt.lane,
-        rt.timeIn,
-        rt.timeOut,
-        rt.membersCount,
-        rt.nonMembersCount,
-        rt.firearmProducts,
-        rt.firearmItems,
-        rt.firearmItemsCount,
-        rt.ammoItems,
-        rt.ammoItemsCount,
-        rt.createdDate as rangeCreatedDate,
-        rt.createdBy as rangeCreatedBy,
-        rt.status as rangeStatus,
-        
-        -- Addon data (one-to-one with appointment)
-ad.name as addonName, 
-        ad.addonType as addonType, 
-        ad.duration as addonDuration,
-        ad.actualPrice as addonActualPrice,
-        ad.price as addonPrice, 
-        ad.itemId as addonItemId
-
-
-
-        
-      FROM appointment a
-      LEFT JOIN customer c ON a.customerId = c.id
-      LEFT JOIN serviceprovider sp ON a.serviceProviderId = sp.id
-      LEFT JOIN location sl ON a.serviceLocation = sl.id
-      LEFT JOIN service s ON a.serviceId = s.id
-      LEFT JOIN location l ON a.locationId = l.id
-      LEFT JOIN resource r ON a.resourceId = r.id
-      LEFT JOIN reccuring rec ON a.recurringId = rec.id
-      LEFT JOIN customermembers cm ON a.customerMemberId = cm.id
-      LEFT JOIN package p ON a.packageId = p.id
-      inner JOIN rangeticket rt ON a.id = rt.appointmentId
-      Left JOIN addon ad on a.id=a.addonId
-      WHERE ${whereClause}
+      SELECT a.* FROM appointment a
+      inner join rangeTicket r on r.appointmentId = a.id
+      WHERE a.serviceProviderId=22
       ORDER BY a.date, a.id
       LIMIT ? OFFSET ?
     `;
     
-    const [appointments] = await mysqlConnection.execute(query, [...params, batchSize, offset]);
+    const [appointments] = await mysqlConnection.execute(query, [ batchSize, offset]);
     
     if (appointments.length === 0) {
       console.log('No more appointments to process.');
@@ -178,17 +138,140 @@ ad.name as addonName,
     
     console.log(`Fetched ${appointments.length} appointments from MySQL`);
     
-    // For each appointment, fetch rental items
+    // Extract unique IDs for batch queries (filter out null/undefined but keep 0)
     const appointmentIds = appointments.map(a => a.id);
+    console.log(`appointmentIds : ${appointmentIds}`);
+    const customerIds = [...new Set(appointments.map(a => a.customerId).filter(id => id != null))];
+    const serviceProviderIds = [...new Set(appointments.map(a => a.serviceProviderId).filter(id => id != null))];
+    const serviceLocationIds = [...new Set(appointments.map(a => a.serviceLocation).filter(id => id != null))];
+    const serviceIds = [...new Set(appointments.map(a => a.serviceId).filter(id => id != null))];
+    const locationIds = [...new Set(appointments.map(a => a.locationId).filter(id => id != null))];
+    const resourceIds = [...new Set(appointments.map(a => a.resourceId).filter(id => id != null))];
+    const recurringIds = [...new Set(appointments.map(a => a.recurringId).filter(id => id != null))];
+    const customerMemberIds = [...new Set(appointments.map(a => a.customerMemberId).filter(id => id != null))];
+    const packageIds = [...new Set(appointments.map(a => a.packageId).filter(id => id != null))];
+    const addonIds = [...new Set(appointments.map(a => a.addonId).filter(id => id != null))];
     
+    // Helper function to create placeholders for IN clause
+    const createPlaceholders = (arr) => arr.map(() => '?').join(',');
+    
+    // Fetch related data in batches
+    const [customers, serviceProviders, serviceLocations, services, locations, resources, 
+           recurrings, customerMembers, packages, addons, rangeTickets] = await Promise.all([
+      // Customers
+      customerIds.length > 0 
+        ? mysqlConnection.execute(
+            `SELECT id, CONCAT(COALESCE(firstName, ''), ' ', COALESCE(lastName, '')) as name FROM customer WHERE id IN (${createPlaceholders(customerIds)})`,
+            customerIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Service Providers
+      serviceProviderIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT id, legalName as name FROM serviceprovider WHERE id IN (${createPlaceholders(serviceProviderIds)})`,
+            serviceProviderIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Service Locations
+      serviceLocationIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT id, name FROM location WHERE id IN (${createPlaceholders(serviceLocationIds)})`,
+            serviceLocationIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Services
+      serviceIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT id, name FROM service WHERE id IN (${createPlaceholders(serviceIds)})`,
+            serviceIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Locations
+      locationIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT id, name FROM location WHERE id IN (${createPlaceholders(locationIds)})`,
+            locationIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Resources
+      resourceIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT id, CONCAT(COALESCE(firstName, ''), ' ', COALESCE(lastName, '')) as name, staffType FROM resource WHERE id IN (${createPlaceholders(resourceIds)})`,
+            resourceIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Recurrings
+      recurringIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT id, pattern FROM reccuring WHERE id IN (${createPlaceholders(recurringIds)})`,
+            recurringIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Customer Members
+      customerMemberIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT id, CONCAT(COALESCE(firstName, ''), ' ', COALESCE(lastName, '')) as name FROM customermembers WHERE id IN (${createPlaceholders(customerMemberIds)})`,
+            customerMemberIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Packages
+      packageIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT id, name FROM package WHERE id IN (${createPlaceholders(packageIds)})`,
+            packageIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Addons
+      addonIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT id, name, addonType, duration, actualPrice, price, itemId FROM addon WHERE id IN (${createPlaceholders(addonIds)})`,
+            addonIds
+          ).then(([rows]) => rows)
+        : [],
+      
+      // Range Tickets
+      
+      appointmentIds.length > 0
+        ? mysqlConnection.execute(
+            `SELECT * FROM rangeticket WHERE appointmentId IN (${createPlaceholders(appointmentIds)})`,
+            appointmentIds
+          ).then(([rows]) => rows)
+        : []
+    ]);
+    
+    console.log(`Fetched related data: ${customers.length} customers, ${serviceProviders.length} providers, ${rangeTickets.length} range tickets`);
+    
+    // Create lookup maps
+    const customerMap = Object.fromEntries(customers.map(c => [c.id, c.name]));
+    const providerMap = Object.fromEntries(serviceProviders.map(sp => [sp.id, sp.name]));
+    const serviceLocationMap = Object.fromEntries(serviceLocations.map(sl => [sl.id, sl.name]));
+    const serviceMap = Object.fromEntries(services.map(s => [s.id, s.name]));
+    const locationMap = Object.fromEntries(locations.map(l => [l.id, l.name]));
+    const resourceMap = Object.fromEntries(resources.map(r => [r.id, { name: r.name, staffType: r.staffType }]));
+    const recurringMap = Object.fromEntries(recurrings.map(rec => [rec.id, rec.pattern]));
+    const customerMemberMap = Object.fromEntries(customerMembers.map(cm => [cm.id, cm.name]));
+    const packageMap = Object.fromEntries(packages.map(p => [p.id, p.name]));
+    const addonMap = Object.fromEntries(addons.map(ad => [ad.id, ad]));
+    const rangeTicketMap = Object.fromEntries(rangeTickets.map(rt => [rt.appointmentId, rt]));
+    
+    // Fetch rental items for range tickets
+    const rangeTicketIds = rangeTickets.map(rt => rt.id);
     let rentalItems = [];
-    if (appointmentIds.length > 0) {
+    
+    if (rangeTicketIds.length > 0) {
       try {
         const [rentals] = await mysqlConnection.execute(
-          `SELECT * FROM rentalitems WHERE rangeTicketId IN (
-            SELECT id FROM rangeticket WHERE appointmentId IN (?)
-          )`,
-          [appointmentIds]
+          `SELECT * FROM rentalitems WHERE rangeTicketId IN (${createPlaceholders(rangeTicketIds)})`,
+          rangeTicketIds
         );
         rentalItems = rentals;
         console.log(`Fetched ${rentalItems.length} rental items`);
@@ -208,35 +291,39 @@ ad.name as addonName,
     
     // Transform data
     const transformedData = appointments.map(appt => {
-      const rentals = rentalsByRangeTicket[appt.rangeTicketId] || [];
+      const rangeTicket = rangeTicketMap[appt.id] || {};
+      const rentals = rentalsByRangeTicket[rangeTicket.id] || [];
+      const resource = resourceMap[appt.resourceId] || {};
+      const addon = addonMap[appt.addonId] || {};
       
       return {
         // Appointment fields
         id: appt.id,
-        customerId: appt.customerId ,
-        customerName: appt.customerName || '',
-        serviceProviderId: appt.serviceProviderId ,
-        providerName: appt.providerName || '',
-        serviceLocation: appt.serviceLocation ,
-        serviceLocationName: appt.serviceLocationName || '',
+        customerId: appt.customerId,
+        customerName: customerMap[appt.customerId] || '',
+        serviceProviderId: appt.serviceProviderId,
+        providerName: providerMap[appt.serviceProviderId] || '',
+        serviceLocation: appt.serviceLocation,
+        serviceLocationName: serviceLocationMap[appt.serviceLocation] || '',
         approval: getApprovalStatus(appt.approval),
         appointmentDate: formatDateOnly(appt.date),
         slotTime: appt.slotTime || '00:00:00',
-        status: appt.status ,
-        serviceId: appt.serviceId ,
-        serviceName: appt.serviceName || '',
-        locationId: appt.locationId ,
-        locationName: appt.locationName || '',
+        status: appt.status,
+        serviceId: appt.serviceId,
+        serviceName: serviceMap[appt.serviceId] || '',
+        locationId: appt.locationId,
+        locationName: locationMap[appt.locationId] || '',
         resourceId: appt.resourceId,
-        resourceName: appt.resourceName || '',
-        recurringId: appt.recurringId ,
-        recurringPattern: appt.recurringPattern || '',
-        invoiceId: appt.invoiceId ,
-        customerMemberId: appt.customerMemberId ,
-        customerMemberName: appt.customerMemberName || '',
-        packageId: appt.packageId ,
-        packageName: appt.packageName || '',
-        payment: appt.payment =1 ? "Yes":"No",
+        resourceName: resource.name || '',
+        resourceStaffType: resource.staffType ? StaffMap[resource.staffType] : 'Non-staff',
+        recurringId: appt.recurringId,
+        recurringPattern: recurringMap[appt.recurringId] || 'Others',
+        invoiceId: appt.invoiceId,
+        customerMemberId: appt.customerMemberId,
+        customerMemberName: customerMemberMap[appt.customerMemberId] || '',
+        packageId: appt.packageId,
+        packageName: packageMap[appt.packageId] || 'Others',
+        payment: appt.payment == 1 ? "Yes" : "No",
         packageEnrollmentId: appt.packageEnrollmentId || 0,
         customId: appt.customId || '',
         bookingMethod: bookingMap[appt.bookingMethod] || '',
@@ -251,7 +338,12 @@ ad.name as addonName,
         parentAppointmentId: appt.parentAppointmentId || 0,
         addons: appt.addons || '',
         addonId: appt.addonId || 0,
-        addonType: appt.addonType || 0,
+        addonName: addon.name || '',
+        addonType: addon.addonType || 0,
+        addonDuration: addon.duration || 0,
+        addonActualPrice: addon.actualPrice || 0,
+        addonPrice: addon.price || 0,
+        addonItemId: addon.itemId || 0,
         additionalServiceParentId: appt.additionalServiceParentId || 0,
         additionalServices: appt.additionalServices || '',
         additionalServiceId: appt.additionalServiceId || 0,
@@ -294,20 +386,20 @@ ad.name as addonName,
         overNight: appt.overNight || 0,
         
         // Range ticket fields
-        rangeTicketId: appt.rangeTicketId ,
-        lane: appt.lane || 0,
-        timeIn: appt.timeIn || '00:00:00',
-        timeOut: appt.timeOut || '00:00:00',
-        membersCount: appt.membersCount || 0,
-        nonMembersCount: appt.nonMembersCount || 0,
-        firearmProducts: appt.firearmProducts || '',
-        firearmItems: appt.firearmItems || '',
-        firearmItemsCount: appt.firearmItemsCount || '',
-        ammoItems: appt.ammoItems || '',
-        ammoItemsCount: appt.ammoItemsCount || '',
-        rangeCreatedDate: formatDate(appt.rangeCreatedDate),
-        rangeCreatedBy: appt.rangeCreatedBy || 0,
-        rangeStatus: appt.rangeStatus || 0,
+        rangeTicketId: rangeTicket.id || 0,
+        lane: rangeTicket.lane || 0,
+        timeIn: rangeTicket.timeIn || '00:00:00',
+        timeOut: rangeTicket.timeOut || '00:00:00',
+        membersCount: rangeTicket.membersCount || 0,
+        nonMembersCount: rangeTicket.nonMembersCount || 0,
+        firearmProducts: rangeTicket.firearmProducts || '',
+        firearmItems: rangeTicket.firearmItems || '',
+        firearmItemsCount: rangeTicket.firearmItemsCount || '',
+        ammoItems: rangeTicket.ammoItems || '',
+        ammoItemsCount: rangeTicket.ammoItemsCount || '',
+        rangeCreatedDate: formatDate(rangeTicket.createdDate),
+        rangeCreatedBy: rangeTicket.createdBy || 0,
+        rangeStatus: rangeTicket.status || 0,
         
         // Aggregated rental items data
         totalRentals: rentals.length,
@@ -325,16 +417,16 @@ ad.name as addonName,
         rentalAmmoUsedCounts: rentals.map(r => r.ammoUsedCount || 0),
         
         // Calculated analytics fields
-        sessionDuration: calculateSessionDuration(appt.timeIn, appt.timeOut),
-        totalVisitors: (appt.membersCount || 0) + (appt.nonMembersCount || 0),
+        sessionDuration: calculateSessionDuration(rangeTicket.timeIn, rangeTicket.timeOut),
+        totalVisitors: (rangeTicket.membersCount || 0) + (rangeTicket.nonMembersCount || 0),
         dayOfWeek: appt.date ? new Date(appt.date).getDay() : 0,
         monthOfYear: appt.date ? new Date(appt.date).getMonth() + 1 : 0,
         year: appt.date ? new Date(appt.date).getFullYear() : 1970,
-        timeOfDay: getTimeOfDay(appt.timeIn),
+        timeOfDay: getTimeOfDay(rangeTicket.timeIn),
         isWeekend: appt.date ? [0, 6].includes(new Date(appt.date).getDay()) ? 1 : 0 : 0,
         totalAmmoUsed: rentals.reduce((sum, r) => sum + (r.ammoUsedCount || 0), 0),
-        hasFirearms: (appt.firearmItems || '').length > 0 ? 1 : 0,
-        hasAmmo: (appt.ammoItems || '').length > 0 ? 1 : 0
+        hasFirearms: (rangeTicket.firearmItems || '').length > 0 ? 1 : 0,
+        hasAmmo: (rangeTicket.ammoItems || '').length > 0 ? 1 : 0
       };
     });
     
@@ -360,7 +452,7 @@ ad.name as addonName,
           console.log(`  -> Inserting ${monthData.length} records for ${yearMonth}...`);
           
           await clickhouseClient.insert({
-            table: 'appointment_enriched',
+            table: 'Range_appointments',
             values: monthData,
             format: 'JSONEachRow'
           });
@@ -385,7 +477,7 @@ ad.name as addonName,
   
   // Verify data in ClickHouse
   const result = await clickhouseClient.query({
-    query: 'SELECT count() as total FROM appointment_enriched',
+    query: 'SELECT count() as total FROM Range_appointments',
     format: 'JSONEachRow'
   });
   
@@ -395,137 +487,140 @@ ad.name as addonName,
 
 async function createClickHouseTable(clickhouseClient) {
   const createTableQuery = `
-    CREATE TABLE IF NOT EXISTS appointment_enriched (
-      -- Appointment core fields
-      id Int32,
-      customerId Int32,
-      customerName String,
-      paymentOptions Int32,
-      serviceProviderId Int32,
-      providerName String,
-      reminders String,
-      firstVisit Int8,
-      serviceLocation Int32,
-      serviceLocationName String,
-      approval Int32,
-      approvalStatus String,
-      date Date,
-      slotTime String,
-      status Int32,
-      serviceId Int32,
-      serviceName String,
-      locationId Int32,
-      locationName String,
-      resourceId Int32,
-      resourceName String,
-      recurringId Int32,
-      recurringPattern String,
-      invoiceId Int32,
-      customerMemberId Int32,
-      customerMemberName String,
-      packageId Int32,
-      packageName String,
-      payment Int8,
-      packageEnrollmentId Int32,
-      customId String,
-      bookingMethod Int32,
-      creationDate DateTime,
-      parentId Int32,
-      cancelType String,
-      membershipId Int32,
-      actualStartTime String,
-      actualEndTime String,
-      additionalStatus Int32,
-      reasonId Int32,
-      parentAppointmentId Int32,
-      addons String,
-      addonId Int32,
-      additionalServiceParentId Int32,
-      additionalServices String,
-      additionalServiceId Int32,
-      additionalCustomers String,
-      additionalCustomerMembers String,
-      instantRedeemable Int8,
-      customerNoteId Int32,
-      checkoutTogether Int8,
-      checkDeviceAvailability Int8,
-      customerConfirmation Int8,
-      treatmentItemId Int32,
-      sequenceDelay String,
-      sequencePriority Int32,
-      additionalPersonsQty Int32,
-      requiredServices String,
-      bookedBy Int32,
-      bookedFrom Int32,
-      bookedNameText String,
-      customerSessionId Int32,
-      isAddedToCart Int32,
-      groupId Int32,
-      sessionEnd Int32,
-      sessionEndDate DateTime,
-      sessionEndBy Int32,
-      extendedAppointment Int32,
-      extendedParentAppointmentId Int32,
-      extendedDuration Int32,
-      extendedPrice Float32,
-      isAppointmentExtended Int32,
-      appointmentRequested Int32,
-      checkinGroupCode String,
-      temp_fetch Int32,
-      internallyDeleted Int32,
-      loggedInCustomerMemberId Int32,
-      startDate Date,
-      endDate Date,
-      additionalPersonParentId Int32,
-      additionalCustomerId Int32,
-      additionalCustomerMemberId Int32,
-      overNight Int32,
-      
-      -- Range ticket fields
-      rangeTicketId Int32,
-      lane Int32,
-      timeIn String,
-      timeOut String,
-      membersCount Int32,
-      nonMembersCount Int32,
-      firearmProducts String,
-      firearmItems String,
-      firearmItemsCount String,
-      ammoItems String,
-      ammoItemsCount String,
-      rangeCreatedDate DateTime,
-      rangeCreatedBy Int32,
-      rangeStatus Int32,
-      
-      -- Rental items (arrays for multiple rentals per appointment)
-      totalRentals Int32,
-      rentalIds Array(Int32),
-      rentalProductIds Array(Int32),
-      rentalInventoryIds Array(Int32),
-      rentalSerialNumbers Array(String),
-      rentalProductTypes Array(String),
-      rentalQuantities Array(Int32),
-      rentalRentTimes Array(DateTime),
-      rentalReturnTimes Array(DateTime),
-      rentalPaidStatuses Array(Int32),
-      rentalInvoiceIds Array(Int32),
-      rentalStatuses Array(Int32),
-      rentalAmmoUsedCounts Array(Int32),
-      
-      -- Analytics fields
-      sessionDuration Int32,
-      totalVisitors Int32,
-      dayOfWeek Int8,
-      monthOfYear Int8,
-      year Int32,
-      timeOfDay String,
-      isWeekend Int8,
-      totalAmmoUsed Int32,
-      hasFirearms Int8,
-      hasAmmo Int8
-    ) ENGINE = MergeTree()
-    ORDER BY (serviceProviderId, date, id)
-    PARTITION BY toYear(date);
+    CREATE TABLE IF NOT EXISTS Range_appointments (
+    id Int32,
+  customerId Int32,
+  customerName String,
+  serviceProviderId Int32,
+  providerName String,
+  serviceLocation Int32,
+  serviceLocationName String,
+  approval String,
+  appointmentDate Date,
+  slotTime String,
+  status Int32,
+  serviceId Int32,
+  serviceName String,
+  locationId Int32,
+  locationName String,
+  resourceId Int32,
+  resourceName String,
+  resourceStaffType String,
+  recurringId Int32,
+  recurringPattern String,
+  invoiceId Int32,
+  customerMemberId Int32,
+  customerMemberName String,
+  packageId Int32,
+  packageName String,
+  payment String,
+  packageEnrollmentId Int32,
+  customId String,
+  bookingMethod String,
+  creationDate DateTime,
+  parentId Int32,
+  cancelType String,
+  membershipId Int32,
+  actualStartTime String,
+  actualEndTime String,
+  additionalStatus Int32,
+  reasonId Int32,
+  parentAppointmentId Int32,
+  addons String,
+  addonId Int32,
+  addonName String, 
+  addonType String,
+  addonDuration Int32,
+  addonActualPrice Int32,
+  addonPrice Int32, 
+  addonItemId Int32,
+  
+  additionalServiceParentId Int32,
+  additionalServices String,
+  additionalServiceId Int32,
+  additionalCustomers String,
+  additionalCustomerMembers String,
+  instantRedeemable Int8,
+  customerNoteId Int32,
+  checkoutTogether Int8,
+  checkDeviceAvailability Int8,
+  customerConfirmation Int8,
+  treatmentItemId Int32,
+  sequenceDelay String,
+  sequencePriority Int32,
+  additionalPersonsQty Int32,
+  requiredServices String,
+  bookedBy Int32,
+  bookedFrom Int32,
+  bookedNameText String,
+  customerSessionId Int32,
+  isAddedToCart Int32,
+  groupId Int32,
+  sessionEnd Int32,
+  sessionEndDate DateTime,
+  sessionEndBy Int32,
+  extendedAppointment Int32,
+  extendedParentAppointmentId Int32,
+  extendedDuration Int32,
+  extendedPrice Float32,
+  isAppointmentExtended Int32,
+  appointmentRequested Int32,
+  checkinGroupCode String,
+  temp_fetch Int32,
+  internallyDeleted Int32,
+  loggedInCustomerMemberId Int32,
+  startDate Date,
+  endDate Date,
+  additionalPersonParentId Int32,
+  additionalCustomerId Int32,
+  additionalCustomerMemberId Int32,
+  overNight Int32,
+  
+  -- Range ticket fields
+  rangeTicketId Int32,
+  lane Int32,
+  timeIn String,
+  timeOut String,
+  membersCount Int32,
+  nonMembersCount Int32,
+  firearmProducts String,
+  firearmItems String,
+  firearmItemsCount String,
+  ammoItems String,
+  ammoItemsCount String,
+  rangeCreatedDate DateTime,
+  rangeCreatedBy Int32,
+  rangeStatus Int32,
+  
+  -- Rental items (arrays for multiple rentals per appointment)
+  totalRentals Int32,
+  rentalIds Array(Int32),
+  rentalProductIds Array(Int32),
+  rentalInventoryIds Array(Int32),
+  rentalSerialNumbers Array(String),
+  rentalProductTypes Array(String),
+  rentalQuantities Array(Int32),
+  rentalRentTimes Array(DateTime),
+  rentalReturnTimes Array(DateTime),
+  rentalPaidStatuses Array(Int32),
+  rentalInvoiceIds Array(Int32),
+  rentalStatuses Array(Int32),
+  rentalAmmoUsedCounts Array(Int32),
+  
+  -- Analytics fields
+  sessionDuration Int32,
+  totalVisitors Int32,
+  dayOfWeek Int8,
+  monthOfYear Int8,
+  year Int32,
+  timeOfDay String,
+  isWeekend Int8,
+  totalAmmoUsed Int32,
+  hasFirearms Int8,
+  hasAmmo Int8
+) ENGINE = MergeTree()
+ORDER BY (serviceProviderId, appointmentDate, id)
+PARTITION BY toYear(appointmentDate);
   `;
   
   await clickhouseClient.exec({ query: createTableQuery });
@@ -590,7 +685,7 @@ async function migrateData() {
   });
 
   try {
-    await migrateClassSession(mysqlConn, clickhouse, CONFIG.batchSize);
+    await migrateAppointments(mysqlConn, clickhouse, CONFIG.batchSize);
   } catch (error) {
     console.error('\n✗ Migration failed:', error);
     console.error('Error details:', error.message);

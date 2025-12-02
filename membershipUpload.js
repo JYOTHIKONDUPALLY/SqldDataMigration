@@ -60,165 +60,158 @@ async function migrateMembership(mysqlConn, clickhouse, batchSize = 2000) {
     const [rows] = await mysqlConn.execute(
       `
       SELECT 
-      -- Primary Keys & IDs
-          me.id AS enrollment_id,
-          me.membershipId AS membership_id,
-          me.customerId AS customer_id,
-          me.memberId AS member_id,
-          me.serviceProviderId AS service_provider_id,
-          me.subscriptionId AS subscription_id,
-          me.invoiceId AS invoice_id,
-          me.originalInvoiceId AS parent_invoice_id,
-          me.locationId AS location_id,
-          m.franchiseId AS franchise_id,
--- Customer & Member Info
-          CONCAT(IFNULL(c.firstName,''),' ',IFNULL(c.lastName,'')) AS customer_name,
-          CONCAT(IFNULL(cm.firstName,''),' ',IFNULL(cm.lastName,'')) AS member_name,
-          me.customerMemberId AS customer_member_id,
-          me.primaryMember AS primary_member,
-          me.parentEnrollmentId AS parent_enrollment_id,
--- Membership Details
-          m.name AS membership_name,
-          mt.type AS membership_type,
-      m.type AS membership_type_id,
-CASE 
-    WHEN me.subscriptionId IS NULL THEN 0 
-    ELSE 1 
-END AS hasFull_membership,
+    me.id AS enrollment_id,
+    me.membershipId AS membership_id,
+    me.customerId AS customer_id,
+    me.memberId AS member_id,
+    me.serviceProviderId AS service_provider_id,
+    me.subscriptionId AS subscription_id,
+    me.invoiceId AS invoice_id,
+    me.originalInvoiceId AS parent_invoice_id,
+    me.locationId AS location_id,
+    m.franchiseId AS franchise_id,
+    CONCAT(IFNULL(c.firstName,''),' ',IFNULL(c.lastName,'')) AS customer_name,
+    CONCAT(IFNULL(cm.firstName,''),' ',IFNULL(cm.lastName,'')) AS member_name,
+    me.customerMemberId AS customer_member_id,
+    me.primaryMember AS primary_member,
+    me.parentEnrollmentId AS parent_enrollment_id,
+    m.name AS membership_name,
+    mt.type AS membership_type,
+    m.type AS membership_type_id,
+    CASE 
+        WHEN me.subscriptionId IS NULL THEN 0 
+        ELSE 1 
+    END AS hasFull_membership,
 
+    CASE 
+        WHEN me.status = 1 AND (me.expirationDate IS NULL OR me.expirationDate >= CURDATE()) THEN 'Active'
+        WHEN me.status = 1 AND me.expirationDate < CURDATE() THEN 'Expired'
+        WHEN me.status = 2 THEN 'Cancelled'
+        WHEN me.status = 3 THEN 'Expired'
+        ELSE 'Unknown'
+    END AS membership_status,
 
-          CASE 
-              WHEN me.status = 1 AND (me.expirationDate IS NULL OR me.expirationDate >= CURDATE()) THEN 'Active'
-              WHEN me.status = 1 AND me.expirationDate < CURDATE() THEN 'Expired'
-              WHEN me.status = 2 THEN 'Cancelled'
-              WHEN me.status = 3 THEN 'Expired'
-              ELSE 'Unknown'
-          END AS membership_status,
+    CASE 
+        WHEN me.status = 1 THEN 'Active'
+        WHEN me.status = 2 THEN 'Cancelled'
+        WHEN me.status = 3 THEN 'Expired'
+        ELSE 'Unknown'
+    END AS enrollment_status,
 
-          CASE 
-              WHEN me.status = 1 THEN 'Active'
-              WHEN me.status = 2 THEN 'Cancelled'
-              WHEN me.status = 3 THEN 'Expired'
-              ELSE 'Unknown'
-          END AS enrollment_status,
+    m.onlineVisible AS online_visible,
 
-          m.onlineVisible AS online_visible,
+    CASE 
+        WHEN s.subscriptionType = 0 THEN 'Monthly'
+        WHEN s.subscriptionType = 1 THEN 'Quarterly'
+        WHEN s.subscriptionType = 2 THEN 'Yearly'
+        WHEN s.subscriptionType = 3 THEN 'Contract'
+        ELSE 'Unknown'
+    END AS subscription_type,
 
-          CASE 
-              WHEN s.subscriptionType = 0 THEN 'Monthly'
-              WHEN s.subscriptionType = 1 THEN 'Quarterly'
-              WHEN s.subscriptionType = 2 THEN 'Yearly'
-              WHEN s.subscriptionType = 3 THEN 'Contract'
-              ELSE 'Unknown'
-          END AS subscription_type,
+    CASE
+        WHEN s.status = 1 AND s.flag = 0 THEN 'Current'
+        WHEN s.status = 1 AND s.flag = 1 THEN 'Pending'
+        WHEN s.status IN (3,6,11) THEN 'OnHold'
+        WHEN s.status = 10 THEN 'PaymentHeight'
+        WHEN s.status = 7 THEN 'Frozen'
+        ELSE 'Unknown'
+    END AS subscription_status,
 
-          CASE
-              WHEN s.status = 1 AND s.flag = 0 THEN 'Current'
-              WHEN s.status = 1 AND s.flag = 1 THEN 'Pending'
-              WHEN s.status IN (3,6,11) THEN 'OnHold'
-              WHEN s.status = 10 THEN 'PaymentHeight'
-              WHEN s.status = 7 THEN 'Frozen'
-              ELSE 'Unknown'
-          END AS subscription_status,
+    CASE WHEN s.subscriptionType IN (1,3) THEN 1 ELSE 0 END AS auto_renew,
+    s.paymentMethod AS payment_method,
 
-          CASE WHEN s.subscriptionType IN (1,3) THEN 1 ELSE 0 END AS auto_renew,
-          s.paymentMethod AS payment_method,
+    me.creationDate AS enrollment_date,
+    me.startDate AS start_date,
+    me.contractDurationDate AS contract_duration_date,
+    me.expirationDate AS expiration_date,
+    s.renewalDate AS next_renewal_date,
+    s.nextBillingDate AS next_billing_date,
+    me.renewalDate AS renewal_date,
+    s.firstRenewalDate AS first_renewal_date,
+    s.renewalNotificationDate AS renewal_notification_date,
+    s.cancellationDate AS cancellation_date,  
+    (
+        SELECT inv.lastUpdated
+        FROM subscriptionInvoice si
+        INNER JOIN invoiceNew inv ON si.invoiceId = inv.id
+        WHERE si.subscriptionId = me.subscriptionId
+        ORDER BY si.id DESC
+        LIMIT 1
+    ) AS last_payment_date,
 
-          me.creationDate AS enrollment_date,
-          me.startDate AS start_date,
-          me.contractDurationDate AS contract_duration_date,
-          me.expirationDate AS expiration_date,
-          s.renewalDate AS next_renewal_date,
-          s.nextBillingDate AS next_billing_date,
-           me.renewalDate AS renewal_date,
-           s.firstRenewalDate AS first_renewal_date,
-      s.renewalNotificationDate AS renewal_notification_date,
-      s.cancellationDate AS cancellation_date,
-      me.deletedOn AS deleted_date,
-      (
-    SELECT inv.lastUpdated
-    FROM subscriptioninvoice si
-    INNER JOIN invoicenew inv ON si.invoiceId = inv.id
-    WHERE si.subscriptionId = me.subscriptionId
-    ORDER BY si.id DESC
-    LIMIT 1
-) AS last_payment_date,
+    (
+        SELECT inv.grandTotal
+        FROM subscriptionInvoice si
+        INNER JOIN invoiceNew inv ON si.invoiceId = inv.id
+        WHERE si.subscriptionId = me.subscriptionId
+        ORDER BY si.id DESC
+        LIMIT 1
+    ) AS last_payment_amount,
 
-(
-    SELECT inv.grandTotal
-    FROM subscriptioninvoice si
-    INNER JOIN invoicenew inv ON si.invoiceId = inv.id
-    WHERE si.subscriptionId = me.subscriptionId
-    ORDER BY si.id DESC
-    LIMIT 1
-) AS last_payment_amount,
+    (
+        SELECT 
+            CASE 
+                WHEN inv.outstandingBalance = 0 
+                     AND s.nextBillingDate > CURDATE() 
+                    THEN 'UPTODATE'
+                WHEN inv.outstandingBalance > 0 AND s.flag = 0
+                    THEN 'FAILED'
+                ELSE 'PENDING'
+            END
+        FROM subscriptionInvoice si
+        INNER JOIN invoiceNew inv ON si.invoiceId = inv.id
+        WHERE si.subscriptionId = me.subscriptionId
+        ORDER BY si.id DESC
+        LIMIT 1
+    ) AS last_payment_status,
 
-(
-    SELECT 
-        CASE 
-            WHEN inv.outstandingBalance = 0 
-                 AND s.nextBillingDate > CURDATE() 
-                THEN 'UPTODATE'
-            WHEN inv.outstandingBalance > 0 AND s.flag = 0
-                THEN 'FAILED'
-            ELSE 'PENDING'
-        END
-    FROM subscriptioninvoice si
-    INNER JOIN invoicenew inv ON si.invoiceId = inv.id
-    WHERE si.subscriptionId = me.subscriptionId
-    ORDER BY si.id DESC
-    LIMIT 1
-) AS last_payment_status,
+    -- Membership Pricing
+    m.price AS membership_price,
+    s.recurringAmount AS recurring_amount,
+    s.amount AS subscription_amount,
+    m.registrationFee AS registration_fee,
+    (IFNULL(m.price,0) + IFNULL(m.registrationFee,0)) AS total_amount,
+    
+    -- Membership Configuration
+    m.durationCount AS duration_count,
+    m.duration AS duration_type,
+    m.renewalType AS renewal_type,
+    m.noOfMembersIncluded AS no_of_members_included,
+    m.noOfAdditionalMembers AS no_of_additional_members,
+    
+    -- Auto-Renewal Tracking
+    s.autoException AS auto_exception,
+    s.declinedCount AS declined_count,
+    s.noOfPayments AS no_of_payments,
+    s.paymentDay AS payment_day,
+    
+    -- Cancellation Info
+    s.cancelReason AS cancel_reason,
+    s.cancelNotes AS cancel_notes,
+   
+    -- Calculated Metrics
+    DATEDIFF(me.expirationDate, CURDATE()) AS days_to_expiration,
+    CASE WHEN me.status = 1 AND (me.expirationDate IS NULL OR me.expirationDate >= CURDATE()) THEN 1 ELSE 0 END AS is_active,
+    CASE WHEN me.expirationDate BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END AS is_expiring_30days,
+    CASE WHEN me.expirationDate BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 60 DAY) THEN 1 ELSE 0 END AS is_expiring_60days,
+    CASE WHEN me.status = 1 AND me.expirationDate < CURDATE() THEN 1 ELSE 0 END AS is_lapsed,
+    CASE WHEN s.declinedCount > 0 THEN 1 ELSE 0 END AS is_auto_renew_failed,
+    CASE WHEN s.cancellationDate IS NOT NULL THEN DATEDIFF(CURDATE(), s.cancellationDate) ELSE NULL END AS days_since_cancellation,
+    
+    -- Categorization
+    me.bookingMethod AS booking_method,
+    m.departmentId AS department_id
 
-          -- Membership Pricing
-          m.price AS membership_price,
-          s.recurringAmount AS recurring_amount,
-          s.amount AS subscription_amount,
-          m.registrationFee AS registration_fee,
-          (IFNULL(m.price,0) + IFNULL(m.registrationFee,0)) AS total_amount,
-          -- Membership Configuration
-      m.durationCount AS duration_count,
-      m.duration AS duration_type,
-      m.renewalType AS renewal_type,
-      m.noOfMembersIncluded AS no_of_members_included,
-      m.noOfAdditionalMembers AS no_of_additional_members,
-      
-      -- Auto-Renewal Tracking
-      s.autoException AS auto_exception,
-      s.declinedCount AS declined_count,
-      s.noOfPayments AS no_of_payments,
-      s.paymentDay AS payment_day,
-      
-      -- Cancellation Info
-      s.cancelReason AS cancel_reason,
-      s.cancelNotes AS cancel_notes,
-      s.deletedBy AS cancelled_by,
-      me.deletedBy AS deleted_by,
-      
-      -- Calculated Metrics
-      DATEDIFF(me.expirationDate, CURDATE()) AS days_to_expiration,
-      CASE WHEN me.status = 1 AND (me.expirationDate IS NULL OR me.expirationDate >= CURDATE()) THEN 1 ELSE 0 END AS is_active,
-      CASE WHEN me.expirationDate BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 1 ELSE 0 END AS is_expiring_30days,
-      CASE WHEN me.expirationDate BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 60 DAY) THEN 1 ELSE 0 END AS is_expiring_60days,
-      CASE WHEN me.status = 1 AND me.expirationDate < CURDATE() THEN 1 ELSE 0 END AS is_lapsed,
-      CASE WHEN s.declinedCount > 0 THEN 1 ELSE 0 END AS is_auto_renew_failed,
-      CASE WHEN s.cancellationDate IS NOT NULL THEN DATEDIFF(CURDATE(), s.cancellationDate) ELSE NULL END AS days_since_cancellation,
-      
-      -- Categorization
-      me.bookingMethod AS booking_method,
-      m.departmentId AS department_id
-
-      FROM membershipenrollment me
-      INNER JOIN membership m ON me.membershipId = m.id
-      LEFT JOIN membershiptype mt ON m.type = mt.id
-      LEFT JOIN subscriptionsnew s ON me.subscriptionId = s.id
-      LEFT JOIN customer c ON me.customerId = c.id
-      LEFT JOIN customer cm ON me.memberId = cm.id
-
-      ORDER BY me.id
-      LIMIT ? OFFSET ?
-      `,
-      [batchSize, offset]
+FROM membershipEnrollment me
+INNER JOIN membership m ON me.membershipId = m.id
+LEFT JOIN membershipType mt ON m.type = mt.id
+LEFT JOIN subscriptionsNew s ON me.subscriptionId = s.id
+LEFT JOIN customer c ON me.customerId = c.id
+LEFT JOIN customer cm ON me.memberId = cm.id
+WHERE me.serviceProviderId = 22
+ORDER BY me.id
+LIMIT ${batchSize} OFFSET ${offset}
+      `
     );
 
     if (rows.length === 0) break;
@@ -269,8 +262,7 @@ END AS hasFull_membership,
     next_renewal_date: formateDateOnly(row.next_renewal_date),
     renewal_notification_date: formateDateOnly(row.renewal_notification_date),
     cancellation_date: formatDateTime(row.cancellation_date),
-    deleted_date: formatDateTime(row.deleted_date),
-    
+   
     // Financial Data
     membership_price: parseFloat(row.membership_price) || 0.00,
     recurring_amount: parseFloat(row.recurring_amount) || 0.00,
@@ -297,8 +289,6 @@ END AS hasFull_membership,
     // Cancellation Info
     cancel_reason: row.cancel_reason || null,
     cancel_notes: row.cancel_notes || null,
-    cancelled_by: row.cancelled_by || null,
-    deleted_by: row.deleted_by || null,
     
     // Calculated Metrics
     days_to_expiration: row.days_to_expiration || 0,
