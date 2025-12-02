@@ -140,7 +140,6 @@ export async function migrateAppointments(mysqlConnection, clickhouseClient, bat
     
     // Extract unique IDs for batch queries (filter out null/undefined but keep 0)
     const appointmentIds = appointments.map(a => a.id);
-    console.log(`appointmentIds : ${appointmentIds}`);
     const customerIds = [...new Set(appointments.map(a => a.customerId).filter(id => id != null))];
     const serviceProviderIds = [...new Set(appointments.map(a => a.serviceProviderId).filter(id => id != null))];
     const serviceLocationIds = [...new Set(appointments.map(a => a.serviceLocation).filter(id => id != null))];
@@ -169,7 +168,7 @@ export async function migrateAppointments(mysqlConnection, clickhouseClient, bat
       // Service Providers
       serviceProviderIds.length > 0
         ? mysqlConnection.execute(
-            `SELECT id, legalName as name FROM serviceprovider WHERE id IN (${createPlaceholders(serviceProviderIds)})`,
+            `SELECT id, legalName as name FROM serviceProvider WHERE id IN (${createPlaceholders(serviceProviderIds)})`,
             serviceProviderIds
           ).then(([rows]) => rows)
         : [],
@@ -217,7 +216,7 @@ export async function migrateAppointments(mysqlConnection, clickhouseClient, bat
       // Customer Members
       customerMemberIds.length > 0
         ? mysqlConnection.execute(
-            `SELECT id, CONCAT(COALESCE(firstName, ''), ' ', COALESCE(lastName, '')) as name FROM customermembers WHERE id IN (${createPlaceholders(customerMemberIds)})`,
+            `SELECT id, CONCAT(COALESCE(firstName, ''), ' ', COALESCE(lastName, '')) as name FROM customerMembers WHERE id IN (${createPlaceholders(customerMemberIds)})`,
             customerMemberIds
           ).then(([rows]) => rows)
         : [],
@@ -242,7 +241,7 @@ export async function migrateAppointments(mysqlConnection, clickhouseClient, bat
       
       appointmentIds.length > 0
         ? mysqlConnection.execute(
-            `SELECT * FROM rangeticket WHERE appointmentId IN (${createPlaceholders(appointmentIds)})`,
+            `SELECT * FROM rangeTicket WHERE appointmentId IN (${createPlaceholders(appointmentIds)})`,
             appointmentIds
           ).then(([rows]) => rows)
         : []
@@ -251,15 +250,15 @@ export async function migrateAppointments(mysqlConnection, clickhouseClient, bat
     console.log(`Fetched related data: ${customers.length} customers, ${serviceProviders.length} providers, ${rangeTickets.length} range tickets`);
     
     // Create lookup maps
-    const customerMap = Object.fromEntries(customers.map(c => [c.id, c.name]));
-    const providerMap = Object.fromEntries(serviceProviders.map(sp => [sp.id, sp.name]));
-    const serviceLocationMap = Object.fromEntries(serviceLocations.map(sl => [sl.id, sl.name]));
-    const serviceMap = Object.fromEntries(services.map(s => [s.id, s.name]));
-    const locationMap = Object.fromEntries(locations.map(l => [l.id, l.name]));
-    const resourceMap = Object.fromEntries(resources.map(r => [r.id, { name: r.name, staffType: r.staffType }]));
-    const recurringMap = Object.fromEntries(recurrings.map(rec => [rec.id, rec.pattern]));
-    const customerMemberMap = Object.fromEntries(customerMembers.map(cm => [cm.id, cm.name]));
-    const packageMap = Object.fromEntries(packages.map(p => [p.id, p.name]));
+    const customerMap = Object.fromEntries(customers.map(c => [c.id, c]));
+    const providerMap = Object.fromEntries(serviceProviders.map(sp => [sp.id, sp]));
+    const serviceLocationMap = Object.fromEntries(serviceLocations.map(sl => [sl.id, sl]));
+    const serviceMap = Object.fromEntries(services.map(s => [s.id, s]));
+    const locationMap = Object.fromEntries(locations.map(l => [l.id, l]));
+    const resourceMap = Object.fromEntries(resources.map(r => [r.id, r]));
+    const recurringMap = Object.fromEntries(recurrings.map(rec => [rec.id, rec]));
+    const customerMemberMap = Object.fromEntries(customerMembers.map(cm => [cm.id, cm]));
+    const packageMap = Object.fromEntries(packages.map(p => [p.id, p]));
     const addonMap = Object.fromEntries(addons.map(ad => [ad.id, ad]));
     const rangeTicketMap = Object.fromEntries(rangeTickets.map(rt => [rt.appointmentId, rt]));
     
@@ -270,7 +269,7 @@ export async function migrateAppointments(mysqlConnection, clickhouseClient, bat
     if (rangeTicketIds.length > 0) {
       try {
         const [rentals] = await mysqlConnection.execute(
-          `SELECT * FROM rentalitems WHERE rangeTicketId IN (${createPlaceholders(rangeTicketIds)})`,
+          `SELECT * FROM rentalItems WHERE rangeTicketId IN (${createPlaceholders(rangeTicketIds)})`,
           rangeTicketIds
         );
         rentalItems = rentals;
@@ -293,36 +292,44 @@ export async function migrateAppointments(mysqlConnection, clickhouseClient, bat
     const transformedData = appointments.map(appt => {
       const rangeTicket = rangeTicketMap[appt.id] || {};
       const rentals = rentalsByRangeTicket[rangeTicket.id] || [];
+      const customer = customerMap[appt.customerId] || {};
+      const provider = providerMap[appt.serviceProviderId] || {};
+      const serviceLocation = serviceLocationMap[appt.serviceLocation] || {};
+      const service = serviceMap[appt.serviceId] || {};
+      const location = locationMap[appt.locationId] || {};
       const resource = resourceMap[appt.resourceId] || {};
+      const recurring = recurringMap[appt.recurringId] || {};
+      const customerMember = customerMemberMap[appt.customerMemberId] || {};
+      const package_ = packageMap[appt.packageId] || {};
       const addon = addonMap[appt.addonId] || {};
       
       return {
         // Appointment fields
         id: appt.id,
         customerId: appt.customerId,
-        customerName: customerMap[appt.customerId] || '',
+        customerName: customer.name || '',
         serviceProviderId: appt.serviceProviderId,
-        providerName: providerMap[appt.serviceProviderId] || '',
+        providerName: provider.name || '',
         serviceLocation: appt.serviceLocation,
-        serviceLocationName: serviceLocationMap[appt.serviceLocation] || '',
+        serviceLocationName: serviceLocation.name || 'Others',
         approval: getApprovalStatus(appt.approval),
         appointmentDate: formatDateOnly(appt.date),
         slotTime: appt.slotTime || '00:00:00',
         status: appt.status,
         serviceId: appt.serviceId,
-        serviceName: serviceMap[appt.serviceId] || '',
+        serviceName: service.name || '',
         locationId: appt.locationId,
-        locationName: locationMap[appt.locationId] || '',
+        locationName: location.name || '',
         resourceId: appt.resourceId,
         resourceName: resource.name || '',
-        resourceStaffType: resource.staffType ? StaffMap[resource.staffType] : 'Non-staff',
+        resourceStaffType: resource.staffType ? StaffMap[resource.staffType] : 'Lane',
         recurringId: appt.recurringId,
-        recurringPattern: recurringMap[appt.recurringId] || 'Others',
+        recurringPattern: recurring.pattern || 'Others',
         invoiceId: appt.invoiceId,
         customerMemberId: appt.customerMemberId,
-        customerMemberName: customerMemberMap[appt.customerMemberId] || '',
+        customerMemberName: customerMember.name || '',
         packageId: appt.packageId,
-        packageName: packageMap[appt.packageId] || 'Others',
+        packageName: package_.name || '',
         payment: appt.payment == 1 ? "Yes" : "No",
         packageEnrollmentId: appt.packageEnrollmentId || 0,
         customId: appt.customId || '',
