@@ -1,6 +1,92 @@
 import mysql from 'mysql2/promise';
 import { createClient } from '@clickhouse/client';
 
+async function getLastMigratedId(clickhouse, tableName) {
+  const result = await clickhouse.query({
+    query: `SELECT last_migrated_id 
+            FROM migration_progress 
+            WHERE table_name = {table_name:String}
+            order by updated_at desc 
+            LIMIT 1`,
+    format: 'JSONEachRow',
+    query_params: { table_name: tableName }
+  });
+
+  const rows = await result.json();
+
+  return rows.length ? rows[0].last_migrated_id : 0;
+}
+
+async function updateLastMigratedId(clickhouse, tableName, lastId, totalRecords) {
+
+  if (totalRecords > 0) {
+    await clickhouse.insert({
+      table: 'migration_progress',
+      values: [{
+        table_name: tableName,
+        last_migrated_id: lastId,
+        updated_at: new Date().toISOString().slice(0, 19).replace("T", " ")
+      }],
+      format: 'JSONEachRow'
+    });
+  }
+
+  console.log("updated the last migrated id");
+}
+
+// async function getDistinctServiceProviders(mysqlConn) {
+//   const [rows] = await mysqlConn.execute(`
+//     SELECT DISTINCT serviceProviderId
+//     FROM invoiceItemNew
+//     WHERE status = 1
+//   `);
+//   return rows.map(r => r.serviceProviderId);
+// }
+
+async function createInvoiceTable(clickhouse, tableName) {
+  const createQuery = `
+    CREATE TABLE IF NOT EXISTS ${tableName}
+    (
+        id UInt64,
+    invoice_id UInt64 NOT NULL,
+    item_type_raw String,
+    item_type String,
+    item_type_id UInt64,
+    category String,
+    subcategory String,
+    brand String,
+    department String,
+    SKU String,
+    UPC String,
+    item_id UInt64,
+    item_name String,
+    invoice_item_name String,
+    COGS UInt64,
+    Commission String,
+    co_faet_tax UInt64 DEFAULT 0,
+    guest_pass_discount UInt64 DEFAULT 0,
+    membership_discount UInt64 DEFAULT 0,
+    package_discount UInt64 DEFAULT 0,
+    refund_amount UInt64 DEFAULT 0,
+    refund_co_faet_tax UInt64 DEFAULT 0,
+    refund_tax UInt64 DEFAULT 0,
+    quantity Int32 DEFAULT 1,
+    unit_price Decimal(12,2),
+    discount_value Decimal(12,2) DEFAULT 0.00,
+    discount_amount Decimal(12,2) DEFAULT 0.00,
+    tax_rate Decimal(5,2),
+    total_price Decimal(12,2) DEFAULT 0.00,
+    created_at DateTime,
+    updated_at DateTime
+) ENGINE = MergeTree()
+ORDER BY (invoice_id, id);
+  `;
+
+  await clickhouse.exec({ query: createQuery });
+  console.log(`📦 Table ready: ${tableName}`);
+}
+
+
 
 /**
  * Get category & subcategory for an item
@@ -24,12 +110,12 @@ async function getCategoryAndSubcategory(type, itemId, mysqlConn) {
       );
       if (service?.serviceTypeId) {
         const [[stype]] = await mysqlConn.execute(
-          "SELECT serviceCategoryId FROM servicetype WHERE id = ?",
+          "SELECT serviceCategoryId FROM serviceType WHERE id = ?",
           [service.serviceTypeId]
         );
         if (stype?.serviceCategoryId) {
           const [[scat]] = await mysqlConn.execute(
-            "SELECT name FROM servicecategory WHERE id = ?",
+            "SELECT name FROM serviceCategory WHERE id = ?",
             [stype.serviceCategoryId]
           );
           category = scat?.name || null;
@@ -55,14 +141,14 @@ async function getCategoryAndSubcategory(type, itemId, mysqlConn) {
         );
         if (product?.category) {
           const [[cat]] = await mysqlConn.execute(
-            "SELECT name FROM productcategory WHERE id = ?",
+            "SELECT name FROM productCategory WHERE id = ?",
             [product.category]
           );
           category = cat?.name || null;
         }
         if (product?.subCategory) {
           const [[subcat]] = await mysqlConn.execute(
-            "SELECT name FROM productcategory WHERE id = ?",
+            "SELECT name FROM productCategory WHERE id = ?",
             [product.subCategory]
           );
           subcategory = subcat?.name || null;
@@ -86,7 +172,7 @@ async function getCategoryAndSubcategory(type, itemId, mysqlConn) {
       );
       if (classRow?.classCategoryId) {
         const [[ccat]] = await mysqlConn.execute(
-          "SELECT name FROM classcategory WHERE id = ?",
+          "SELECT name FROM classCategory WHERE id = ?",
           [classRow.classCategoryId]
         );
         category = ccat?.name || null;
@@ -104,7 +190,7 @@ async function getCategoryAndSubcategory(type, itemId, mysqlConn) {
       );
       if (pkg?.type) {
         const [[ptype]] = await mysqlConn.execute(
-          "SELECT type AS name FROM packagetype WHERE id = ?",
+          "SELECT type AS name FROM packageType WHERE id = ?",
           [pkg.type]
         );
         category = ptype?.name || null;
@@ -122,7 +208,7 @@ async function getCategoryAndSubcategory(type, itemId, mysqlConn) {
       );
       if (membership?.type) {
         const [[mtype]] = await mysqlConn.execute(
-          "SELECT type FROM membershiptype WHERE id = ?",
+          "SELECT type FROM membershipType WHERE id = ?",
           [membership.type]
         );
         category = mtype?.type || "Membership";
@@ -136,7 +222,7 @@ async function getCategoryAndSubcategory(type, itemId, mysqlConn) {
     // ---------------------- GIFT CARD ----------------------
     case "giftcard": {
       const [[gift]] = await mysqlConn.execute(
-        "SELECT itemType FROM giftcard WHERE id = ?",
+        "SELECT itemType FROM giftCard WHERE id = ?",
         [itemId]
       );
       category = gift?.itemType || "Gift Card";
@@ -179,10 +265,141 @@ async function getCategoryAndSubcategory(type, itemId, mysqlConn) {
   return { category, subcategory };
 }
 
-async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
+  function removeItemPrefix(name) {
+    if (!name) return name;
+    const str = String(name).trim();
+    const prefixes = ['product:', 'service:', 'class:', 'membership:', 'appointment:', 'package:'];
+    for (const prefix of prefixes) {
+      if (str.toLowerCase().startsWith(prefix.toLowerCase())) {
+        return str.substring(prefix.length).trim();
+      }
+    }
+    return str;
+  }
+async function deriveItemName(type, itemId, rawName, mysqlConn) {
+  if (!type || !itemId) return removeItemPrefix(rawName);
+
+  switch (type.toLowerCase()) {
+
+    case "service":
+    case "appointment":
+    case "advancebookingfee": {
+      const [[row]] = await mysqlConn.execute(
+        "SELECT name FROM service WHERE id = ?",
+        [itemId]
+      );
+      return row?.name || removeItemPrefix(rawName);
+    }
+
+    case "class":
+    case "classes": {
+      const [[row]] = await mysqlConn.execute(
+        "SELECT name FROM class WHERE id = ?",
+        [itemId]
+      );
+      return row?.name || removeItemPrefix(rawName);
+    }
+
+    case "package":
+    case "packages": {
+      const [[row]] = await mysqlConn.execute(
+        "SELECT name FROM package WHERE id = ?",
+        [itemId]
+      );
+      return row?.name || removeItemPrefix(rawName);
+    }
+
+    case "membership":
+    case "memberships":
+    case "membershipregistrationfee": {
+      const [[row]] = await mysqlConn.execute(
+        "SELECT name FROM membership WHERE id = ?",
+        [itemId]
+      );
+      return row?.name || removeItemPrefix(rawName);
+    }
+
+    case "product":
+    case "membershiprental": {
+      const [[row]] = await mysqlConn.execute(
+        "SELECT name FROM product WHERE id = ?",
+        [itemId]
+      );
+      return row?.name || removeItemPrefix(rawName);
+    }
+
+    case "rental": {
+      const [[rental]] = await mysqlConn.execute(
+        "SELECT productId FROM rentalItems WHERE id = ?",
+        [itemId]
+      );
+      if (rental?.productId) {
+        const [[prod]] = await mysqlConn.execute(
+          "SELECT name FROM product WHERE id = ?",
+          [rental.productId]
+        );
+        return prod?.name || removeItemPrefix(rawName);
+      }
+      return removeItemPrefix(rawName);
+    }
+
+    case "giftcard": {
+      const [[row]] = await mysqlConn.execute(
+        "SELECT name FROM giftCard WHERE id = ?",
+        [itemId]
+      );
+      return row?.name || removeItemPrefix(rawName);
+    }
+
+    case "warranty": {
+      const [[row]] = await mysqlConn.execute(
+        "SELECT name FROM warranty WHERE id = ?",
+        [itemId]
+      );
+      return row?.name || removeItemPrefix(rawName);
+    }
+
+    case "tradein":
+      return "Trade-in";
+
+    case "forfeiteddeposit":
+      return "Forfeited Deposit";
+
+    default:
+      if (type.toLowerCase().startsWith("misc")) {
+        return "Miscellaneous Item";
+      }
+      return removeItemPrefix(rawName);
+  }
+}
+
+function normalizeItemType(type) {
+  if (!type) return type;
+
+  const t = type.toLowerCase();
+  if(t === 'appointment') return 'service';
+  if (t === 'advancebookingfee') return 'service';
+  if (t === 'classes') return 'class';
+  if (t === 'packages') return 'package';
+  if (t === 'membershipregistrationfee') return 'membership';
+
+  if (t.startsWith('misc')) return 'misc';
+
+  return t;
+}
+
+
+
+async function migrateInvoiceItems(mysqlConn, clickhouse, serviceProviderId, batchSize = 1000) {
+
+  const TABLE_KEY = `invoice_items_detail_${serviceProviderId}`;
+
   const safeNum = (v, def = 0) =>
     v === null || v === undefined || v === '' || isNaN(Number(v)) ? def : Number(v);
   const safeStr = (v, def = '') => (v === null || v === undefined ? def : String(v));
+
+  // Remove prefixes from item names (e.g., "product: ", "service: ", etc.)
+
 
   // Format dates for ClickHouse (DateTime)
   function formatDate(dateValue) {
@@ -193,17 +410,21 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
   }
 
   try {
+
+    let lastId = await getLastMigratedId(clickhouse, TABLE_KEY);
+    console.log(`▶ Resuming migration from invoiceItemNew.id > ${lastId}`);
+
     // ✅ Preload brand/category/subcategory mappings
-    const [brands] = await mysqlConn.execute(`SELECT id, name FROM productbrand`);
-    const [categories] = await mysqlConn.execute(`SELECT id, name FROM productcategory`);
-    const [subcategories] = await mysqlConn.execute(`SELECT id, name FROM productcategory`);
+    const [brands] = await mysqlConn.execute(`SELECT id, name FROM productBrand`);
+    const [categories] = await mysqlConn.execute(`SELECT id, name FROM productCategory`);
+    const [subcategories] = await mysqlConn.execute(`SELECT id, name FROM productCategory`);
 
     const brandMap = new Map(brands.map(b => [b.name.toLowerCase(), b.id]));
     const categoryMap = new Map(categories.map(c => [c.name.toLowerCase(), c.id]));
     const subCategoryMap = new Map(subcategories.map(s => [s.name.toLowerCase(), s.id]));
 
     // Count total rows
-    const [countResult] = await mysqlConn.execute(`SELECT COUNT(*) as total FROM invoiceItemNew where serviceProviderId = 22`);
+    const [countResult] = await mysqlConn.execute(`SELECT COUNT(*) as total FROM invoiceItemNew where serviceProviderId = ${serviceProviderId} AND invoiceItemNew.id > ${lastId}`);
     const totalRecords = countResult[0].total;
     console.log(`Total invoice items to migrate: ${totalRecords}`);
 
@@ -212,19 +433,30 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
       const [rows] = await mysqlConn.execute(
         `SELECT i.*
          FROM invoiceItemNew i
-         where i.serviceProviderId = 22
+         where i.serviceProviderId = ${serviceProviderId}
+         AND i.id > ${lastId}
          ORDER BY i.id
-         LIMIT ${batchSize} OFFSET ${offset}`
+         LIMIT ${batchSize}`
       );
 
       const data = [];
       for (const r of rows) {
+        lastId = r.id;
         // console.log(`processing datat row id: ${JSON.stringify(r)}`);
         // console.log(`Processing invoice item ID: ${r.id}, Type: ${r.type}, Item type ID: ${r.itemTypeId} with cogs: ${r.cogs}, commission: ${r.commission}`);
         // --- brand/sku/upc lookup for products ---
         let brandName = "N/A";
         let skuValue = null;
         let upcValue = null;
+        const rawInvoiceItemName = safeStr(r.itemName);
+
+        const normalizedType = normalizeItemType(r.type);
+        const derivedItemName = await deriveItemName(
+          normalizedType,
+          r.itemId,
+          rawInvoiceItemName,
+          mysqlConn
+        );
 
         if (r.type === "product" && r.itemId) {
           const [[productRow]] = await mysqlConn.execute(
@@ -236,18 +468,18 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
             upcValue = productRow.barCode || null;
             if (productRow.productBrandId) {
               const [[brandRow]] = await mysqlConn.execute(
-                "SELECT name FROM productbrand WHERE id = ?",
+                "SELECT name FROM productBrand WHERE id = ?",
                 [productRow.productBrandId]
               );
               brandName = brandRow?.name || "N/A";
             }
           }
 
-          // console.log(` Product ID ${r.itemId} → Brand: ${brandName}, SKU: ${skuValue}, UPC: ${upcValue}`);
+
         }
 
         // --- category/subcategory ---
-        const categoryData = await getCategoryAndSubcategory(r.type, r.itemId, mysqlConn);
+        const categoryData = await getCategoryAndSubcategory(normalizedType, r.itemId, mysqlConn);
 
         // --- discounts ---
         async function calcRedeemDiscount(type) {
@@ -274,32 +506,36 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
         const packageDiscount = await calcRedeemDiscount("packageRedeem");
         const guestpassDiscount = await calcRedeemDiscount("guestpassRedeem");
         const [CogsData] = await mysqlConn.execute(
-    `SELECT c.cogs, c.commission 
+          `SELECT c.cogs, c.commission 
      FROM cashSaleInvoice c 
      WHERE c.invoiceItemId = ?`,
-    [r.id]
-  );
+          [r.id]
+        );
 
-  const { Cogs, Commission } = CogsData[0] || {};
-  console.log(`Invoice item ${r.id} has Cogs: ${Cogs}, Commission: ${Commission}`);
+        const { Cogs, Commission } = CogsData[0] || {};
+
         // --- build record ---
         data.push({
           id: r.id,
           invoice_id: r.invoiceId,
           item_type_id: r.itemTypeId || 0,
-          item_type: r.type,
+          item_type_raw: r.type,
+          item_type: normalizedType,
+
           category: categoryData.category || "N/A",
           sub_category: categoryData.subcategory || "N/A",
           brand: brandName,
           SKU: skuValue || null,
           UPC: upcValue || null,
           item_id: r.itemId,
-          item_name: safeStr(r.itemName),
+          item_name: removeItemPrefix(safeStr(r.itemName)),
+          invoice_item_name: rawInvoiceItemName,
+          item_name: derivedItemName,
           quantity: safeNum(r.qty),
           unit_price: safeNum(r.price),
           discount_amount: safeNum(r.discount),
           discount_value: safeNum(r.saleDiscount || r.discount),
-          tax_rate: safeNum(r.tax || r.GST || r.PST || r.HST || r.QST),
+          tax_rate: safeNum(r.tax || r.GST || r.PST || r.HST || r.QST).toFixed(2),
           total_price: safeNum(r.totalPrice),
           resource_id: r.resourceId || 0,
           department_id: r.departmentId || 0,
@@ -309,7 +545,7 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
           guest_pass_discount: guestpassDiscount,
           membership_discount: membershipDiscount,
           package_discount: packageDiscount,
-          refund_amount: Math.round(safeNum(r.returnAmount || r.totalReturnAmount)),
+          refund_amount: r.refund_amount < 0 ? 0 : Math.round(safeNum(r.returnAmount || r.totalReturnAmount)),
           refund_tax: Math.round(safeNum(r.taxReturnAmount)),
           refund_co_faet_tax: safeNum(r.pifTaxReturnAmount),
           created_at: formatDate(r.createdDate),
@@ -321,7 +557,7 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
       if (data.length > 0) {
         try {
           await clickhouse.insert({
-            table: 'invoice_items_detail',
+            table: TABLE_KEY,
             values: data,
             format: 'JSONEachRow',
           });
@@ -331,7 +567,7 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
           for (const rec of data) {
             try {
               await clickhouse.insert({
-                table: 'invoice_items_detail',
+                table: TABLE_KEY,
                 values: [rec],
                 format: 'JSONEachRow',
               });
@@ -345,6 +581,9 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
       offset += batchSize;
     }
 
+    await updateLastMigratedId(clickhouse, TABLE_KEY, lastId, totalRecords);
+    console.log(`✔ Migrated up to ID: ${lastId}`);
+
     console.log('🎉 Invoice items migration completed!');
   } catch (err) {
     console.error('❌ Invoice items migration error:', err);
@@ -354,12 +593,11 @@ async function migrateInvoiceItems(mysqlConn, clickhouse, batchSize = 1000) {
 
 async function migrateData() {
 
-    const mysqlConn = await mysql.createConnection({
-    host: 'localhost',
-    user: 'root',
-    password: '',
-    database: 'bizzflo',
-  });
+  const mysqlConn = await mysql.createConnection({ host: 'localhost', user: 'root', password: '', database: 'bizzflo', }); // ClickHouse connection 
+
+  console.log("✅ Connected to MySQL!");
+  const [resultRows] = await mysqlConn.execute('SELECT NOW() AS now');
+  console.log("DB Time:", resultRows[0].now);
 
   const clickhouse = createClient({
     url: 'http://localhost:8123',
@@ -369,7 +607,16 @@ async function migrateData() {
   });
 
   try {
-    await migrateInvoiceItems(mysqlConn, clickhouse);
+    // const providerIds = await getDistinctServiceProviders(mysqlConn);
+    // console.log(`🔑 Found ${providerIds.length} service providers`);
+    // for (const providerId of providerIds) {
+      const providerId = 22;
+      const tableName = `invoice_items_detail_${providerId}`;
+      // console.log(`\n🚀 Migrating provider ${providerId}`);
+
+      await createInvoiceTable(clickhouse, tableName);
+      await migrateInvoiceItems(mysqlConn, clickhouse, providerId);
+    // }
   } finally {
     await mysqlConn.end();
     await clickhouse.close();

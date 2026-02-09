@@ -174,6 +174,10 @@ async function migrateCustomers(mysqlConn, clickhouse,batchSize = 100) {
                     [row.id]
                 );
                 const loyaltyPoints = points[0]?.points || 0;
+                            const CustomerName = [row.firstName, row.middleName, row.lastName]
+  .map(v => v?.trim())
+  .filter(Boolean)
+  .join(' ');
 
                 // build ClickHouse row
                 values.push({
@@ -182,7 +186,7 @@ async function migrateCustomers(mysqlConn, clickhouse,batchSize = 100) {
                     franchise: franchiseName,
                     provider_id: serviceProviderId,
                     provider: serviceProviderName[0]?.name || '',
-                    CustomerName: `${row.firstName || ''} ${row.middleName || ''} ${row.lastName || ''}`.trim(),
+                       CustomerName:  CustomerName.replace(/\s+/g, ' '),
                     FirstName: row.firstName || '',
                     MiddleName: row.middleName || '',
                     LastName: row.lastName || '',

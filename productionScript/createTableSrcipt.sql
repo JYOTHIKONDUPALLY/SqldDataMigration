@@ -1,40 +1,5 @@
-CREATE TABLE invoice_items_detail (
-    id UInt64,
-    invoice_id UInt64 NOT NULL,
-    item_type_raw String,
-    item_type String,
-    item_type_id UInt64,
-    category String,
-    subcategory String,
-    brand String,
-    department String,
-    SKU String,
-    UPC String,
-    item_id UInt64,
-    item_name String,
-    invoice_item_name String,
-    COGS UInt64,
-    Commission String,
-    co_faet_tax UInt64 DEFAULT 0,
-    guest_pass_discount UInt64 DEFAULT 0,
-    membership_discount UInt64 DEFAULT 0,
-    package_discount UInt64 DEFAULT 0,
-    refund_amount UInt64 DEFAULT 0,
-    refund_co_faet_tax UInt64 DEFAULT 0,
-    refund_tax UInt64 DEFAULT 0,
-    quantity Int32 DEFAULT 1,
-    unit_price Decimal(12,2),
-    discount_value Decimal(12,2) DEFAULT 0.00,
-    discount_amount Decimal(12,2) DEFAULT 0.00,
-    tax_rate Decimal(5,2),
-    total_price Decimal(12,2) DEFAULT 0.00,
-    created_at DateTime,
-    updated_at DateTime
-) ENGINE = MergeTree()
-ORDER BY (invoice_id, id);
-
-
-CREATE TABLE invoice_details
+DROP TABLE IF EXISTS clickHouseInvoice.invoice_details
+CREATE TABLE invoice_details_2087
 (
     id                UInt64,
     invoice_date      Date,
@@ -69,30 +34,8 @@ CREATE TABLE invoice_details
 ENGINE = MergeTree
 ORDER BY (id);
 
-CREATE TABLE paymentDetails (
-    id UInt64,
-    franchise String,
-    franchise_id UInt64,
-    provider String,
-    provider_id UInt64,
-    location String,
-    location_id UInt64,
-    invoice_id UInt64 NOT NULL,
-    pos_terminal String,
-    pos_terminal_id UInt64,
-    payment_date Date,
-    amount_paid Decimal(12,2),
-    payment_method_id UInt64,
-    payment_method String,
-    refund_amount Decimal(12,2),
-    notes String,
-    created_at DateTime,
-    updated_at DateTime
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(payment_date)
-ORDER BY (payment_date, invoice_id, id);
-
-CREATE TABLE customers
+DROP TABLE IF EXISTS clickHouseInvoice.customers
+CREATE TABLE customers_2087
 (
     id UInt32,
 franchise_id UInt32,
@@ -128,10 +71,83 @@ provider String,
 ENGINE = MergeTree()
 ORDER BY Email;
 
+DROP TABLE IF EXISTS clickHouseInvoice.serviceprovider
+CREATE TABLE clickHouseInvoice.serviceprovider_2087
+(
+    id UInt32,
+    serviceCategoryId UInt32,
+    serviceCategoryName String,
+    legalName String,
+    creationDate DateTime,
+    expiryDate DateTime,
+    hasMembership String   -- 0 = No, 1 = Yes
+)
+ENGINE = MergeTree()
+ORDER BY id;
+
+DROP TABLE IF EXISTS clickHouseInvoice.invoice_items_detail
+CREATE TABLE invoice_items_detail_2087 (
+    id UInt64,
+    invoice_id UInt64 NOT NULL,
+    item_type String,
+    item_type_id UInt64,
+    category String,
+    subcategory String,
+    brand String,
+    deaprtment String,
+    SKU String,
+    UPC String,
+    item_id UInt64,
+    item_name String,
+    COGS UInt64,
+    Commission String,
+    co_faet_tax UInt64 DEFAULT 0,,
+    guest_pass_discount UInt64 DEFAULT 0,
+    membership_discount UInt64 DEFAULT 0,
+    package_discount UInt64 DEFAULT 0,
+    refund_amount UInt64 DEFAULT 0,
+    refund_co_faet_tax UInt64 DEFAULT 0,
+    refund_tax UInt64 DEFAULT 0,
+    quantity Int32 DEFAULT 1,
+    unit_price Decimal(12,2),
+    discount_value Decimal(12,2) DEFAULT 0.00,
+    discount_amount Decimal(12,2) DEFAULT 0.00,
+    tax_rate Decimal(5,2),
+    total_price Decimal(12,2) DEFAULT 0.00,
+    created_at DateTime,
+    updated_at DateTime
+) ENGINE = MergeTree()
+ORDER BY (invoice_id, id);
 
 
 
-CREATE TABLE IF NOT EXISTS product_inventory (
+ DROP TABLE IF EXISTS clickHouseInvoice.paymentDetails
+CREATE TABLE paymentDetails_2087 (
+    id UInt64,
+    franchise String,
+    franchise_id UInt64,
+    provider String,
+    provider_id UInt64,
+    location String,
+    location_id UInt64,
+    invoice_id UInt64 NOT NULL,
+    pos_terminal String,
+    pos_terminal_id UInt64,
+    payment_date Date,
+    amount_paid Decimal(12,2),
+    payment_method_id UInt64,
+    payment_method String,
+    refund_amount Decimal(12,2),
+    notes String,
+    created_at DateTime,
+    updated_at DateTime
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(payment_date)
+ORDER BY (payment_date, invoice_id, id);
+
+
+ DROP TABLE IF EXISTS clickHouseInvoice.product_inventory
+CREATE TABLE IF NOT EXISTS product_inventory_2087 (
     -- Primary identifiers
     id UInt64,
     franchise_id UInt64,
@@ -188,21 +204,10 @@ CREATE TABLE IF NOT EXISTS product_inventory (
 ORDER BY ( id)
 PARTITION BY toYYYYMM(created_at);
 
-CREATE TABLE clickHouseInvoice.serviceprovider
-(
-    id UInt32,
-    serviceCategoryId UInt32,
-    serviceCategoryName String,
-    legalName String,
-    creationDate DateTime,
-    expiryDate DateTime,
-    hasMembership String   -- 0 = No, 1 = Yes
-)
-ENGINE = MergeTree()
-ORDER BY id;
 
 
-CREATE TABLE IF NOT EXISTS class_sessions (
+ DROP TABLE IF EXISTS clickHouseInvoice.class_sessions
+CREATE TABLE IF NOT EXISTS class_sessions_2087 (
     -- Primary Keys
     session_id UInt32,
     class_id UInt32,
@@ -277,8 +282,8 @@ ORDER BY (service_provider_id, session_date, class_id, session_id)
 SETTINGS index_granularity = 8192;
 
 
-
-CREATE TABLE IF NOT EXISTS memberships
+ DROP TABLE IF EXISTS clickHouseInvoice.memberships
+CREATE TABLE IF NOT EXISTS memberships_2087
 (
     -- Primary Keys & IDs
     enrollment_id UInt64,
@@ -382,14 +387,139 @@ ALTER TABLE memberships ADD INDEX idx_membership_status membership_status TYPE s
 ALTER TABLE memberships ADD INDEX idx_auto_renew auto_renew TYPE set(0) GRANULARITY 4;
 
 
-
-
-
-CREATE TABLE migration_progress
-(
-    table_name String,
-    last_migrated_id UInt64,
-    updated_at DateTime DEFAULT now()
-)
-ENGINE = MergeTree
-ORDER BY table_name;
+DROP TABLE IF EXISTS clickHouseInvoice.Range_appointments_2087 ;
+CREATE TABLE IF NOT EXISTS Range_appointments.2087 (
+  -- Appointment core fields
+  id Int32,
+  customerId Int32,
+  customerName String,
+  serviceProviderId Int32,
+  providerName String,
+  serviceLocation Int32,
+  serviceLocationName String,
+  approval String,
+  appointmentDate Date,
+  slotTime String,
+  status Int32,
+  serviceId Int32,
+  serviceName String,
+  locationId Int32,
+  locationName String,
+  resourceId Int32,
+  resourceName String,
+  resourceStaffType String,
+  recurringId Int32,
+  recurringPattern String,
+  invoiceId Int32,
+  customerMemberId Int32,
+  customerMemberName String,
+  packageId Int32,
+  packageName String,
+  payment String,
+  packageEnrollmentId Int32,
+  customId String,
+  bookingMethod String,
+  creationDate DateTime,
+  parentId Int32,
+  cancelType String,
+  membershipId Int32,
+  actualStartTime String,
+  actualEndTime String,
+  additionalStatus Int32,
+  reasonId Int32,
+  parentAppointmentId Int32,
+  addons String,
+  addonId Int32,
+  addonName String, 
+  addonType String,
+  addonDuration Int32,
+  addonActualPrice Int32,
+  addonPrice Int32, 
+  addonItemId Int32,
+  
+  additionalServiceParentId Int32,
+  additionalServices String,
+  additionalServiceId Int32,
+  additionalCustomers String,
+  additionalCustomerMembers String,
+  instantRedeemable Int8,
+  customerNoteId Int32,
+  checkoutTogether Int8,
+  checkDeviceAvailability Int8,
+  customerConfirmation Int8,
+  treatmentItemId Int32,
+  sequenceDelay String,
+  sequencePriority Int32,
+  additionalPersonsQty Int32,
+  requiredServices String,
+  bookedBy Int32,
+  bookedFrom Int32,
+  bookedNameText String,
+  customerSessionId Int32,
+  isAddedToCart Int32,
+  groupId Int32,
+  sessionEnd Int32,
+  sessionEndDate DateTime,
+  sessionEndBy Int32,
+  extendedAppointment Int32,
+  extendedParentAppointmentId Int32,
+  extendedDuration Int32,
+  extendedPrice Float32,
+  isAppointmentExtended Int32,
+  appointmentRequested Int32,
+  checkinGroupCode String,
+  temp_fetch Int32,
+  internallyDeleted Int32,
+  loggedInCustomerMemberId Int32,
+  startDate Date,
+  endDate Date,
+  additionalPersonParentId Int32,
+  additionalCustomerId Int32,
+  additionalCustomerMemberId Int32,
+  overNight Int32,
+  
+  -- Range ticket fields
+  rangeTicketId Int32,
+  lane Int32,
+  timeIn String,
+  timeOut String,
+  membersCount Int32,
+  nonMembersCount Int32,
+  firearmProducts String,
+  firearmItems String,
+  firearmItemsCount String,
+  ammoItems String,
+  ammoItemsCount String,
+  rangeCreatedDate DateTime,
+  rangeCreatedBy Int32,
+  rangeStatus Int32,
+  
+  -- Rental items (arrays for multiple rentals per appointment)
+  totalRentals Int32,
+  rentalIds Array(Int32),
+  rentalProductIds Array(Int32),
+  rentalInventoryIds Array(Int32),
+  rentalSerialNumbers Array(String),
+  rentalProductTypes Array(String),
+  rentalQuantities Array(Int32),
+  rentalRentTimes Array(DateTime),
+  rentalReturnTimes Array(DateTime),
+  rentalPaidStatuses Array(Int32),
+  rentalInvoiceIds Array(Int32),
+  rentalStatuses Array(Int32),
+  rentalAmmoUsedCounts Array(Int32),
+  
+  -- Analytics fields
+  sessionDuration Int32,
+  totalVisitors Int32,
+  dayOfWeek Int8,
+  monthOfYear Int8,
+  year Int32,
+  timeOfDay String,
+  isWeekend Int8,
+  totalAmmoUsed Int32,
+  hasFirearms Int8,
+  hasAmmo Int8
+) ENGINE = MergeTree()
+ORDER BY (serviceProviderId, appointmentDate, id)
+PARTITION BY toYear(appointmentDate);
